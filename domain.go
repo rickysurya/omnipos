@@ -13,22 +13,33 @@ type Command struct {
 	Text       string
 }
 
+type KDSAction struct {
+	OrderID int    `json:"order_id"`
+	Status  string `json:"status"` // "preparing", "ready", "completed"
+}
+
 type Storage interface {
 	GetState(ctx context.Context, customerID string) (string, error)
 	UpdateState(ctx context.Context, customerID string, newState string) error
 	AddItemToOrder(ctx context.Context, customerID string, item string, quantity int) error
-	CompleteOrder(ctx context.Context, customerID string, address string) ([]string, error)
+	CompleteOrder(ctx context.Context, customerID string, address string) (int, []string, error)
 	GetPendingItems(ctx context.Context, customerID string) ([]string, error)
 	CancelPendingOrder(ctx context.Context, customerID string) error
+	UpdateOrderStatus(ctx context.Context, orderID int, status string) (string, error)
 }
 
 type Broadcaster interface {
 	Broadcast(msg string)
 }
 
+type Notifier interface {
+	SendNotification(customerID string, message string) error
+}
+
 type Engine struct {
-	store Storage
-	bcast Broadcaster
+	store    Storage
+	bcast    Broadcaster
+	notifier Notifier
 }
 
 var itemQtyRegex = regexp.MustCompile(`(?i)^(\d+)\s*x?\s*(.+)$`)
@@ -48,7 +59,6 @@ func (e *Engine) Process(ctx context.Context, cmd Command) (string, error) {
 	text := strings.TrimSpace(cmd.Text)
 	lowerText := strings.ToLower(text)
 
-	// Global command interceptor
 	if lowerText == "/cancel" {
 		if err := e.store.CancelPendingOrder(ctx, cmd.CustomerID); err != nil {
 			return "", err
@@ -116,15 +126,15 @@ func (e *Engine) Process(ctx context.Context, cmd Command) (string, error) {
 			replyText = "Please send a valid delivery address or type '/cancel' to abort."
 		} else {
 			nextState = "idle"
-			items, err := e.store.CompleteOrder(ctx, cmd.CustomerID, text)
+			orderID, items, err := e.store.CompleteOrder(ctx, cmd.CustomerID, text)
 			if err != nil {
 				return "", fmt.Errorf("failed to complete order: %v", err)
 			}
 
-			replyText = fmt.Sprintf("Address confirmed: %s\n\nYour order is being prepared:\n- %s", text, strings.Join(items, "\n- "))
+			replyText = fmt.Sprintf("Address confirmed: %s\n\nOrder #%d is registered:\n- %s", text, orderID, strings.Join(items, "\n- "))
 
-			kdsMsg := fmt.Sprintf("NEW ORDER | Customer: %s | Address: %s | Items: [%s]",
-				cmd.CustomerID, text, strings.Join(items, ", "))
+			kdsMsg := fmt.Sprintf("NEW_ORDER|ID:%d|Customer:%s|Address:%s|Items:%s",
+				orderID, cmd.CustomerID, text, strings.Join(items, ", "))
 			e.bcast.Broadcast(kdsMsg)
 		}
 
@@ -140,4 +150,25 @@ func (e *Engine) Process(ctx context.Context, cmd Command) (string, error) {
 	}
 
 	return replyText, nil
+}
+
+func (e *Engine) ProcessKitchenUpdate(ctx context.Context, action KDSAction) error {
+	customerID, err := e.store.UpdateOrderStatus(ctx, action.OrderID, action.Status)
+	if err != nil {
+		return err
+	}
+
+	var msg string
+	switch action.Status {
+	case "preparing":
+		msg = fmt.Sprintf("👨‍🍳 Order #%d is now being prepared in the kitchen!", action.OrderID)
+	case "ready":
+		msg = fmt.Sprintf("🔔 Order #%d is ready for delivery!", action.OrderID)
+	case "completed":
+		msg = fmt.Sprintf("✅ Order #%d is complete. Thank you!", action.OrderID)
+	default:
+		return nil
+	}
+
+	return e.notifier.SendNotification(customerID, msg)
 }

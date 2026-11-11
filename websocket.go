@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -9,53 +11,82 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type Hub struct {
-	clients   map[*websocket.Conn]bool
-	broadcast chan string
-	mu        sync.Mutex
+	clients    map[*websocket.Conn]bool
+	broadcast  chan string
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	mu         sync.Mutex
+	engine     *Engine
 }
 
-func NewHub() *Hub {
+func NewHub(engine *Engine) *Hub {
 	return &Hub{
-		clients:   make(map[*websocket.Conn]bool),
-		broadcast: make(chan string),
+		clients:    make(map[*websocket.Conn]bool),
+		broadcast:  make(chan string),
+		register:   make(chan *websocket.Conn),
+		unregister: make(chan *websocket.Conn),
+		engine:     engine,
 	}
 }
 
 func (h *Hub) Run() {
 	for {
-		msg := <-h.broadcast
-		h.mu.Lock()
-		for client := range h.clients {
-			err := client.WriteMessage(websocket.TextMessage, []byte(msg))
-			if err != nil {
-				client.Close()
-				delete(h.clients, client)
+		select {
+		case conn := <-h.register:
+			h.mu.Lock()
+			h.clients[conn] = true
+			h.mu.Unlock()
+		case conn := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[conn]; ok {
+				delete(h.clients, conn)
+				conn.Close()
 			}
+			h.mu.Unlock()
+		case message := <-h.broadcast:
+			h.mu.Lock()
+			for conn := range h.clients {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
+					conn.Close()
+					delete(h.clients, conn)
+				}
+			}
+			h.mu.Unlock()
 		}
-		h.mu.Unlock()
 	}
+}
+
+func (h *Hub) Broadcast(msg string) {
+	h.broadcast <- msg
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("WebSocket Upgrade Error:", err)
+		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
+	h.register <- conn
 
-	h.mu.Lock()
-	h.clients[conn] = true
-	h.mu.Unlock()
+	defer func() {
+		h.unregister <- conn
+	}()
 
-	log.Println("New Kitchen Display connected.")
-}
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
 
-func (h *Hub) Broadcast(msg string) {
-	h.broadcast <- msg
+		var action KDSAction
+		if err := json.Unmarshal(message, &action); err == nil && action.OrderID > 0 {
+			if err := h.engine.ProcessKitchenUpdate(context.Background(), action); err != nil {
+				log.Printf("Failed to process kitchen update: %v", err)
+			}
+		}
+	}
 }

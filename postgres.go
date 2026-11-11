@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,37 +57,38 @@ func (p *PostgresStorage) AddItemToOrder(ctx context.Context, customerID string,
 	return tx.Commit(ctx)
 }
 
-func (p *PostgresStorage) CompleteOrder(ctx context.Context, customerID string, address string) ([]string, error) {
+func (p *PostgresStorage) CompleteOrder(ctx context.Context, customerID string, address string) (int, []string, error) {
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	var orderID int
 	err = tx.QueryRow(ctx, `
-		UPDATE orders SET status = 'completed', address = $2 
+		UPDATE orders SET status = 'confirmed', address = $2 
 		WHERE customer_id = $1 AND status = 'pending' 
 		RETURNING id`, customerID, address).Scan(&orderID)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 
-	rows, err := tx.Query(ctx, `SELECT item_name FROM order_items WHERE order_id = $1`, orderID)
+	rows, err := tx.Query(ctx, `SELECT item_name, quantity FROM order_items WHERE order_id = $1`, orderID)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	defer rows.Close()
 
 	var items []string
 	for rows.Next() {
 		var name string
-		if err := rows.Scan(&name); err == nil {
-			items = append(items, name)
+		var qty int
+		if err := rows.Scan(&name, &qty); err == nil {
+			items = append(items, fmt.Sprintf("%dx %s", qty, name))
 		}
 	}
 
-	return items, tx.Commit(ctx)
+	return orderID, items, tx.Commit(ctx)
 }
 
 func (p *PostgresStorage) CancelPendingOrder(ctx context.Context, customerID string) error {
@@ -121,4 +123,14 @@ func (p *PostgresStorage) GetPendingItems(ctx context.Context, customerID string
 		}
 	}
 	return items, nil
+}
+
+func (p *PostgresStorage) UpdateOrderStatus(ctx context.Context, orderID int, status string) (string, error) {
+	var customerID string
+	err := p.db.QueryRow(ctx, `
+		UPDATE orders 
+		SET status = $2 
+		WHERE id = $1 
+		RETURNING customer_id`, orderID, status).Scan(&customerID)
+	return customerID, err
 }
