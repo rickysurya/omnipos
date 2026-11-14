@@ -1,16 +1,31 @@
-version: "3.8"
+# Local development database. This is not a production deployment descriptor.
+# Reasoning for each choice: docs/adr/0002-database-image-and-access.md
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:18-trixie
     container_name: omnipos-db
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: pos_db
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-omnipos}
+      APP_DB_USER: ${APP_DB_USER:-omnipos_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      # Loopback only. Publishing on all interfaces would expose the database to the LAN.
+      - "127.0.0.1:5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18 images keep data in a versioned directory below this path.
+      - pgdata18:/var/lib/postgresql
+      - ./db/initdb:/docker-entrypoint-initdb.d:ro
+      # Kept outside initdb.d because the entrypoint would otherwise run it without its variables.
+      - ./db/grants.psql:/opt/omnipos/grants.psql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
 volumes:
-  pgdata:
+  pgdata18:

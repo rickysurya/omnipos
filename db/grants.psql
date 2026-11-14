@@ -1,0 +1,25 @@
+-- What the application role may do. Run as the owner role, and run it again after any migration
+-- that adds a table. It is safe to repeat: it removes every table grant first and then states
+-- exactly what is allowed, so the result never depends on what ran before.
+--
+--   psql -v app_user=omnipos_app -f db/grants.psql
+--
+-- Nothing here grants DELETE, TRUNCATE or schema changes. Cancelled orders stay as rows with
+-- status 'cancelled'.
+
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM :"app_user";
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM :"app_user";
+
+GRANT USAGE ON SCHEMA public TO :"app_user";
+
+-- Conversation state and the order header change as the order moves along.
+GRANT SELECT, INSERT, UPDATE ON customers, orders TO :"app_user";
+
+-- Order lines are written once. No UPDATE, so a recorded price can never be altered.
+GRANT SELECT, INSERT ON order_items, processed_updates TO :"app_user";
+
+-- The menu is read only for the application. Prices and availability are changed by the owner role,
+-- so a compromised application cannot give itself a discount.
+GRANT SELECT ON menu_items TO :"app_user";
+
+GRANT USAGE, SELECT ON SEQUENCE orders_id_seq, order_items_id_seq TO :"app_user";
